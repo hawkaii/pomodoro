@@ -154,7 +154,12 @@ records nothing.
 - `/` — server-rendered HTML. No JavaScript, no CDN, works offline.
 - `/data.json` — the same numbers as JSON.
 
-The port is written to `~/.local/share/pomodoro/port`.
+It listens on **http://127.0.0.1:8791/** — a fixed port, so you can bookmark it.
+If 8791 is taken it falls back to any free port and records it in
+`~/.local/share/pomodoro/port`. The page refreshes itself every 30 s.
+
+A row appears only when a focus block **runs to zero**. Skipping or resetting
+records nothing, so an empty page means no block has finished yet.
 
 Metrics: today, this week (Monday start), this month, all time, day streak,
 last 14 days, minutes per label, 25 most recent sessions.

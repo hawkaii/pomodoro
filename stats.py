@@ -192,7 +192,7 @@ def render_html() -> str:
         f'<span class="lbar"><i style="width:{int(x["minutes"] / total_label_min * 100)}%;background:{x["color"]}"></i></span>'
         f'<span class="lval">{_hm(x["minutes"])}</span></div>'
         for x in d["by_label"]
-    ) or '<div class="empty">No sessions yet.</div>'
+    ) or '<div class="empty">Nothing yet. Finish a focus block and this fills in.</div>'
 
     recent_html = "".join(
         f'<tr><td>{r["date"]}</td><td>{r["time"]}</td><td>{r["minutes"]} min</td>'
@@ -203,6 +203,7 @@ def render_html() -> str:
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="30">
 <title>Pomodoro stats</title>
 <style>
   :root {{ --bg:#0d0d0d; --card:#151515; --line:#242424; --fg:#ffffff;
@@ -280,10 +281,25 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+PREFERRED_PORT = 8791
+
+
 def start_server() -> int:
-    """Start the stats page on 127.0.0.1 and return the port."""
+    """Start the stats page on 127.0.0.1 and return the port.
+
+    The port is fixed so the URL is stable and bookmarkable. If it is taken we
+    fall back to any free port rather than refusing to start.
+    """
     init_db()
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv = None
+    for port in (PREFERRED_PORT, 0):
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            break
+        except OSError:
+            continue
+    if srv is None:
+        raise OSError("could not bind the stats server")
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
