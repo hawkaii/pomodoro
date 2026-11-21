@@ -69,6 +69,8 @@ def status():
         rem = max(0.0, rem - (time.time() - d.get("updated_at", 0)))
     if phase == "idle" and not going:
         return {"text": PENGUIN, "class": ["pomodoro-idle"]}
+    if d.get("alarm"):
+        return {"text": fmt(rem), "class": ["pomodoro-alarm"]}
     if not going:
         return {"text": fmt(rem), "class": ["pomodoro-paused"]}
     cls = {"focus": "pomodoro-focus", "break": "pomodoro-break",

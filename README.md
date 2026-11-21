@@ -89,6 +89,7 @@ hyprctl reload
 |---|---|
 | Left click the box | Opens the panel. **Does not start anything.** |
 | `START` / `PAUSE` / `RESUME` | One primary button, changes with the state. |
+| `DISMISS` | Appears while the alarm rings. Stops the sound. |
 | `✕` | Hides the panel. A running timer keeps counting down. |
 | Right click the box | Pause / resume without opening the panel |
 | Middle click the box | Reset |
@@ -96,6 +97,23 @@ hyprctl reload
 
 Defaults: focus 20 min, break 5, long break 20, long break after every 4
 breaks. Every number has `[-]` / `[+]` in the panel. Values persist.
+
+### Alarm
+
+When a block ends the clock **stops** and an alarm loops until you dismiss it.
+Nothing drains while it rings, so you never lose the start of the next block.
+
+Dismiss in either place:
+
+- the `DISMISS` button, which replaces the primary button while ringing
+- the critical desktop notification, if your notification daemon reports the
+  click back to `notify-send`
+
+`AUTO` decides what happens after you dismiss: on, the next block starts by
+itself; off, it waits for `START`.
+
+The chime is synthesised once into `~/.local/share/pomodoro/alarm.wav` and
+looped with `paplay`. No audio assets are shipped in this repo.
 
 The `LABEL` button cycles through `focus`, `study`, `code`, `review`. The
 label is stored with each finished focus block and drives the stats breakdown.
@@ -105,6 +123,7 @@ Every panel action is also a socket command, so you can bind them to keys:
 ```bash
 ~/.config/pomodoro-mc/waybar/pomodoro toggle   # also: open close start pause
                                                # reset skip label stats primary
+                                               # dismiss
 ```
 
 

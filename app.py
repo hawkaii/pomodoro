@@ -18,6 +18,7 @@ gi.require_version("GLib", "2.0")
 import atexit
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -29,12 +30,14 @@ from gi.repository import Gdk, GLib, Gtk
 import stats
 
 PORT = 0
+ALARM_PROC = None
 
 XDG = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
 SOCK = os.path.join(XDG, "pomodoro.sock")
 PIDF = os.path.join(XDG, "pomodoro.pid")
 STATEDIR = os.path.join(XDG, "pomodoro")
 STATE = os.path.join(STATEDIR, "state.json")
+DATA_RUNTIME = os.path.expanduser("~/.local/share/pomodoro")
 LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log")
 
 APP_ID = "io.github.hawkaii.pomodoro"
@@ -51,6 +54,7 @@ S = {
     "panel_open": False,
     "auto": True,
     "label": "focus",
+    "alarm": False,
     "updated_at": 0.0,
 }
 
@@ -112,6 +116,91 @@ def ctl(cmd):
         s.close()
     except OSError:
         pass
+
+
+def alarm_wav():
+    """A short two-tone chime, synthesised once into the data dir."""
+    import math
+    import struct
+    import wave
+
+    os.makedirs(os.path.join(DATA_RUNTIME, ""), exist_ok=True)
+    path = os.path.join(DATA_RUNTIME, "alarm.wav")
+    if os.path.exists(path) and os.path.getsize(path) > 2000:
+        return path
+    rate = 48000
+
+    def tone(freq, dur, amp=0.34):
+        n = int(rate * dur)
+        out = []
+        for i in range(n):
+            env = min(1.0, i / (rate * 0.008)) * min(1.0, (n - i) / (rate * 0.02))
+            out.append(amp * env * math.sin(2 * math.pi * freq * i / rate))
+        return out
+
+    gap = [0.0] * int(rate * 0.09)
+    rest = [0.0] * int(rate * 0.30)
+    seq = []
+    for _ in range(3):
+        seq += tone(880, 0.12) + gap + tone(1318, 0.14) + rest
+    try:
+        with wave.open(path, "w") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"".join(struct.pack("<hh", int(v * 32767), int(v * 32767)) for v in seq))
+    except OSError as exc:
+        _log("could not write alarm wav:", exc)
+    return path
+
+
+def alarm_start():
+    """Loop the chime until alarm_stop(). One process, killed as a group."""
+    global ALARM_PROC
+    if ALARM_PROC and ALARM_PROC.poll() is None:
+        return
+    path = alarm_wav()
+    if not os.path.exists(path):
+        return
+    try:
+        ALARM_PROC = subprocess.Popen(
+            ["sh", "-c", f'while :; do paplay "{path}"; done'],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        _log("alarm_start failed:", exc)
+        ALARM_PROC = None
+
+
+def alarm_stop():
+    global ALARM_PROC
+    if not ALARM_PROC:
+        return
+    try:
+        os.killpg(os.getpgid(ALARM_PROC.pid), signal.SIGTERM)
+    except Exception:
+        try:
+            ALARM_PROC.terminate()
+        except Exception:
+            pass
+    ALARM_PROC = None
+
+
+def notify_alarm(title, body):
+    """Critical notification. If the daemon reports a click, dismiss the alarm."""
+    def run():
+        try:
+            r = subprocess.run(
+                ["notify-send", "-u", "critical", "-a", "pomodoro",
+                 "-A", "default=Dismiss", title, body],
+                capture_output=True, text=True, timeout=600,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                GLib.idle_add(lambda: (cmd_dismiss(), False)[1])
+        except Exception as exc:
+            _log("notify_alarm failed:", exc)
+    threading.Thread(target=run, daemon=True).start()
 
 
 def notify(title, body):
@@ -194,7 +283,10 @@ def cmd_start():
 
 
 def cmd_primary():
-    """The middle button: start when idle, pause when running, resume when paused."""
+    """The middle button: dismiss the alarm, else start/pause/resume."""
+    if S.get("alarm"):
+        cmd_dismiss()
+        return
     if S["phase"] == "idle":
         cmd_start()
     elif S["running"]:
@@ -230,15 +322,18 @@ def phase_dur():
     return 0
 
 
-def advance(record=True):
+def advance(record=True, ring=True):
+    """Move to the next phase.
+
+    ring=True  -> the block ended on its own: stop the clock, sound the alarm.
+    ring=False -> SKIP was pressed: move on without an alarm or a saved block.
+    """
     if S["phase"] == "focus":
         if record:
-            # Only a block that actually ran to zero counts as work.
             try:
                 stats.record(S["cfg"]["focus"], S.get("label") or "focus")
             except Exception as exc:      # stats must never break the timer
                 _log("stats.record failed:", exc)
-            notify("Focus done", f"{S['cfg']['focus']} min saved to stats")
         S["sessions"] += 1
         S["breaks"] += 1
         if S["breaks"] >= S["cfg"]["every"]:
@@ -247,24 +342,41 @@ def advance(record=True):
         else:
             S["phase"] = "break"
         S["remaining_s"] = S["cfg"]["long" if S["phase"] == "longbreak" else "break"] * 60
-        S["running"] = True
-        S["updated_at"] = now()
-        notify("Break started", f"{S['cfg']['long' if S['phase'] == 'longbreak' else 'break']} min")
     elif S["phase"] in ("break", "longbreak"):
-        if S["auto"]:
-            S["phase"] = "focus"
-            S["remaining_s"] = S["cfg"]["focus"] * 60
-            S["running"] = True
-        else:
-            S["phase"] = "idle"
-            S["running"] = False
+        S["phase"] = "focus"
+        S["remaining_s"] = S["cfg"]["focus"] * 60
+    else:
+        return
+
+    S["updated_at"] = now()
+    if ring:
+        S["running"] = False        # nothing drains while the alarm rings
+        S["alarm"] = True
+    else:
+        S["running"] = True
+    save()
+    sync_ui()
+
+    if ring:
+        alarm_start()
+        label = {"focus": "Focus done", "break": "Break over",
+                 "longbreak": "Long break over"}.get(S["phase"], "Timer")
+        extra = " - tap to dismiss" if S["auto"] else ""
+        notify_alarm(f"{label}", f"{phase_text()}: {fmt(S['remaining_s'])}{extra}")
+
+
+def cmd_dismiss():
+    S["alarm"] = False
+    alarm_stop()
+    if S["auto"] and S["phase"] != "idle" and S["remaining_s"] > 0:
+        S["running"] = True         # AUTO: carry on into the next phase
         S["updated_at"] = now()
     save()
     sync_ui()
 
 
 def cmd_skip():
-    advance(record=False)      # skipping is not completed work
+    advance(record=False, ring=False)   # skipping is not completed work
 
 
 def cmd_set(key, value):
@@ -343,7 +455,7 @@ def dispatch(cmd):
         "toggle": cmd_toggle, "open": cmd_open, "close": cmd_close,
         "start": cmd_start, "pause": cmd_pause, "reset": cmd_reset,
         "skip": cmd_skip, "label": cmd_cycle_label, "stats": open_stats,
-        "primary": cmd_primary,
+        "primary": cmd_primary, "dismiss": cmd_dismiss,
     }
     if cmd in handlers:
         handlers[cmd]()
@@ -467,8 +579,13 @@ def sync_ui(force=False):
         f'<span foreground="#3d3d3d">{"● " * (n - done)}</span>'
     )
 
-    W["primary"].set_label("START" if S["phase"] == "idle"
-                           else ("PAUSE" if S["running"] else "RESUME"))
+    if S.get("alarm"):
+        W["primary"].set_label("DISMISS")
+        W["primary"].add_css_class("alarm")
+    else:
+        W["primary"].remove_css_class("alarm")
+        W["primary"].set_label("START" if S["phase"] == "idle"
+                               else ("PAUSE" if S["running"] else "RESUME"))
 
     for key, w in W["steppers"].items():
         w["val"].set_text(str(S["cfg"][key]))
@@ -591,6 +708,8 @@ CSS = """
 #pomodoro-rounds { font-size: 11px; margin: 2px 0 4px 0; }
 #pomodoro-controls { margin: 2px 0 8px 0; }
 #pomodoro-btn {
+	background-image: none;
+	box-shadow: none;
 	background-color: #1c1c1c;
 	color: #e8e8e8;
 	border: none;
@@ -603,6 +722,7 @@ CSS = """
 #pomodoro-btn:hover { background-color: #2a2a2a; }
 #pomodoro-btn.primary { background-color: #DA291C; color: #ffffff; }
 #pomodoro-btn.primary:hover { background-color: #f03a2c; }
+#pomodoro-btn.alarm { background-image: none; background-color: #ffffff; color: #DA291C; }
 #pomodoro-rows { margin: 0 0 6px 0; }
 #steplabel { min-width: 74px; color: #8a8a8a; font-size: 10px; letter-spacing: 2px; }
 #stepval { min-width: 26px; color: #ffffff; font-size: 13px; }
