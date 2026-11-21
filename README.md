@@ -96,6 +96,14 @@ breaks. Every number has `[-]` / `[+]` in the panel. Values persist.
 The `LABEL` button cycles through `focus`, `study`, `code`, `review`. The
 label is stored with each finished focus block and drives the stats breakdown.
 
+Every panel action is also a socket command, so you can bind them to keys:
+
+```bash
+~/.config/pomodoro-mc/waybar/pomodoro toggle   # also: open close start pause
+                                               # reset skip label stats
+```
+
+
 ## Session record
 
 Inspired by [sasa95/pomodor](https://github.com/sasa95/pomodor) (MIT), where a

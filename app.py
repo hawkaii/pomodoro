@@ -328,7 +328,7 @@ def dispatch(cmd):
     handlers = {
         "toggle": cmd_toggle, "open": cmd_open, "close": cmd_close,
         "start": cmd_start, "pause": cmd_pause, "reset": cmd_reset,
-        "skip": cmd_skip,
+        "skip": cmd_skip, "label": cmd_cycle_label, "stats": open_stats,
     }
     if cmd in handlers:
         handlers[cmd]()
