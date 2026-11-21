@@ -153,6 +153,32 @@ def collect(days: int = 14) -> dict:
 
 # ---------------------------------------------------------------- page
 
+def read_live():
+    """The block that is running right now, so the page is not silent mid-session."""
+    X = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    try:
+        with open(os.path.join(X, "pomodoro", "state.json")) as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    phase = d.get("phase")
+    if phase == "idle" or not d.get("remaining_s"):
+        return None
+    left = d["remaining_s"]
+    if d.get("running"):
+        left = max(0.0, left - (time.time() - d.get("updated_at", 0)))
+    dur = {"focus": d.get("cfg", {}).get("focus"),
+           "break": d.get("cfg", {}).get("break"),
+           "longbreak": d.get("cfg", {}).get("long")}.get(phase)
+    if not dur:
+        return None
+    elapsed = max(0.0, dur * 60 - left)
+    return {"phase": phase, "running": bool(d.get("running")),
+            "alarm": bool(d.get("alarm")), "label": d.get("label") or "focus",
+            "elapsed_min": int(elapsed // 60), "elapsed_s": int(elapsed % 60),
+            "left": int(left)}
+
+
 def _hm(minutes: int) -> str:
     h, m = divmod(int(minutes), 60)
     return f"{h}h {m:02d}m" if h else f"{m}m"
@@ -160,6 +186,7 @@ def _hm(minutes: int) -> str:
 
 def render_html() -> str:
     d = collect(14)
+    live = read_live()
     peak = max([s["minutes"] for s in d["series"]] + [1])
 
     cards = [
@@ -199,6 +226,20 @@ def render_html() -> str:
         f'<td><span class="pill">{r["label"]}</span></td></tr>'
         for r in d["recent"]
     ) or '<tr><td colspan="4" class="empty">No sessions recorded yet. Finish a focus block and it lands here.</td></tr>'
+
+    if live:
+        label = {"focus": "FOCUS", "break": "BREAK", "longbreak": "LONG BREAK"}.get(live["phase"], "SESSION")
+        state = "PAUSED" if not live["running"] else ("ALARM" if live["alarm"] else "IN PROGRESS")
+        m, sec = divmod(live["left"], 60)
+        now_html = (
+            f'<div class="now{" alarm" if live["alarm"] else ""}">'
+            f'<span class="live-dot"></span>'
+            f'<b>{label}</b> {state} &middot; {live["elapsed_min"]}m {live["elapsed_s"]:02d}s elapsed'
+            f' &middot; {m}:{sec:02d} left &middot; label {live["label"]}'
+            f'<span class="hint">saved when the block reaches zero</span></div>'
+        )
+    else:
+        now_html = ""
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -240,10 +281,20 @@ def render_html() -> str:
   .pill {{ background:#1e1e1e; border-radius:8px; padding:2px 8px; font-size:11px; }}
   .empty {{ color:var(--muted); }}
   .streak {{ color:var(--muted); font-size:12px; margin-top:8px; }}
+  .now {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+         background:#161616; border:1px solid #2a2a2a; border-left:3px solid var(--accent);
+         border-radius:12px; padding:12px 16px; margin-bottom:12px; color:#ddd; }}
+  .now.alarm {{ border-left-color:#ffffff; background:#1d1010; }}
+  .now b {{ color:#fff; letter-spacing:1.5px; }}
+  .now .hint {{ margin-left:auto; padding-left:14px; border-left:1px solid #2a2a2a;
+                color:var(--muted); font-size:11px; }}
+  .live-dot {{ width:8px; height:8px; border-radius:50%; background:var(--accent);
+               box-shadow:0 0 0 4px rgba(218,41,28,.18); flex:none; }}
   @media (max-width:720px) {{ .grid {{ grid-template-columns:repeat(2,1fr); }} }}
 </style></head>
 <body>
 <header><h1>POMODORO<span>.</span></h1><div class="gen">{d["generated"]}</div></header>
+{now_html}
 <div class="grid">{card_html}</div>
 <div class="panel"><div class="pt">LAST 14 DAYS</div><div class="chart">{bars}</div>
   <div class="streak">Streak: {d["streak"]} day{"s" if d["streak"] != 1 else ""} in a row</div></div>
