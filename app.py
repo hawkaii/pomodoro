@@ -230,13 +230,15 @@ def phase_dur():
     return 0
 
 
-def advance():
+def advance(record=True):
     if S["phase"] == "focus":
-        try:
-            stats.record(S["cfg"]["focus"], S.get("label") or "focus")
-        except Exception as exc:      # stats must never break the timer
-            _log("stats.record failed:", exc)
-        notify("Focus done", f"{S['cfg']['focus']} min saved to stats")
+        if record:
+            # Only a block that actually ran to zero counts as work.
+            try:
+                stats.record(S["cfg"]["focus"], S.get("label") or "focus")
+            except Exception as exc:      # stats must never break the timer
+                _log("stats.record failed:", exc)
+            notify("Focus done", f"{S['cfg']['focus']} min saved to stats")
         S["sessions"] += 1
         S["breaks"] += 1
         if S["breaks"] >= S["cfg"]["every"]:
@@ -262,7 +264,7 @@ def advance():
 
 
 def cmd_skip():
-    advance()
+    advance(record=False)      # skipping is not completed work
 
 
 def cmd_set(key, value):
