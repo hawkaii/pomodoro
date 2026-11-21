@@ -1,0 +1,11 @@
+{
+	"custom/pomodoro": {
+		"exec": "/home/hawkaii/.config/waybar/scripts/pomodoro status",
+		"return-type": "json",
+		"interval": 1,
+		"on-click": "/home/hawkaii/.config/waybar/scripts/pomodoro toggle",
+		"on-click-right": "/home/hawkaii/.config/waybar/scripts/pomodoro pause",
+		"on-click-middle": "/home/hawkaii/.config/waybar/scripts/pomodoro reset",
+		"tooltip": false
+	}
+}

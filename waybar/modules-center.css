@@ -1,0 +1,20 @@
+/* ---------------------------
+   Pomodoro timer
+   Takes the custom/distro slot: same red box, same glyph when idle.
+   While a session runs the glyph is replaced by the countdown.
+---------------------------- */
+
+#custom-pomodoro {
+	padding: 0 10px 0 5px;
+	background-color: @accent;
+	color: @main-bg;
+	font-size: 20px;
+}
+#custom-pomodoro.pomodoro-focus,
+#custom-pomodoro.pomodoro-break,
+#custom-pomodoro.pomodoro-paused {
+	font-size: 14px;
+}
+#custom-pomodoro.pomodoro-paused {
+	color: alpha(@main-bg, 0.55);
+}

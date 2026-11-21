@@ -1,0 +1,144 @@
+# pomodoro
+
+A small Pomodoro timer for **Waybar** on **Hyprland**. The bar box shows the
+countdown. Click it for a floating control panel. Finished focus blocks are
+saved to a local SQLite database and shown on a stats page at `localhost`.
+
+No Electron, no Node, no browser runtime for the timer itself.
+
+```
+idle     [ 󰌽 ]            the glyph from custom/distro
+running  [ 19:58 ]        same red box, countdown replaces the glyph
+```
+
+## What it looks like
+
+- **Bar**: one module, styled exactly like the `custom/distro` box it replaces
+  (red `@accent` background, dark foreground, 20 px icon / 14 px countdown).
+- **Panel**: 292 px wide, dark `#0d0d0d`, rounded, JetBrainsMono, red accent.
+  Opens at the top-right of the focused monitor.
+- **Stats**: dark page, four stat cards, a 14-day bar chart, a per-label
+  breakdown and the 25 most recent sessions.
+
+## Architecture
+
+Two programs. They share a file and a socket, not code.
+
+```
+app.py            580 lines   GTK4 window + timer + unix socket + stats server
+stats.py          330 lines   SQLite history + local HTTP page
+waybar/pomodoro    91 lines   bar front-end (JSON in, commands out)
+```
+
+```
+   click the red box
+            │
+            ▼
+   waybar ── runs ──▶ waybar/pomodoro toggle
+            │              │ spawns app.py if the socket is dead
+            │              ▼
+            │         unix socket ──▶ app.py   (timer + GTK panel)
+            │                            │
+            │                            ├── SQLite  ~/.local/share/pomodoro/history.db
+            │                            ├── HTTP    127.0.0.1:<random port>  ← stats page
+            │                            └── hyprctl (position, monitor geometry)
+            ▼
+   every 1 s: waybar/pomodoro status
+            reads $XDG_RUNTIME_DIR/pomodoro/state.json
+            prints {"text": "19:58", "class": ["pomodoro-focus"]}
+```
+
+The timer does not need Waybar. It does need Hyprland for window placement
+(`hyprctl`); that is about 30 lines in `place_window()`.
+
+## Install
+
+Requires: Python 3.11+, PyGObject, GTK 4, Waybar, Hyprland.
+
+```bash
+git clone https://github.com/hawkaii/pomodoro ~/.config/pomodoro-mc
+chmod +x ~/.config/pomodoro-mc/waybar/pomodoro
+
+ln -sf ~/.config/pomodoro-mc/waybar/pomodoro  ~/.config/waybar/scripts/pomodoro
+cp    ~/.config/pomodoro-mc/waybar/pomodoro.jsonc ~/.config/waybar/modules/custom/
+```
+
+Then add the module to `~/.config/waybar/config.jsonc` in `modules-center`,
+where `custom/distro` used to sit:
+
+```jsonc
+"custom/distro",
+"custom/pomodoro",
+```
+
+Append the CSS from `waybar/modules-center.css` to
+`~/.config/waybar/styles/modules-center.css`, and the window rules from
+`hypr/hyprland.conf` to `~/.config/hypr/hyprland.conf`. Reload both:
+
+```bash
+kill -SIGUSR2 -x waybar
+hyprctl reload
+```
+
+## Use
+
+| Action | Result |
+|---|---|
+| Left click the box | Opens the panel. Starts a focus block if idle. |
+| `✕` | Hides the panel. The box keeps counting down. |
+| Right click the box | Pause / resume without opening the panel |
+| Middle click the box | Reset |
+| `STATS` in the panel | Opens `http://127.0.0.1:<port>/` in your browser |
+
+Defaults: focus 20 min, break 5, long break 20, long break after every 4
+breaks. Every number has `[-]` / `[+]` in the panel. Values persist.
+
+The `LABEL` button cycles through `focus`, `study`, `code`, `review`. The
+label is stored with each finished focus block and drives the stats breakdown.
+
+## Session record
+
+Inspired by [sasa95/pomodor](https://github.com/sasa95/pomodor) (MIT), where a
+session is `{ duration, label, createdAt }` and stats are minutes and session
+counts per day and per label. This project keeps that model and replaces
+Firebase with a local SQLite file.
+
+```sql
+CREATE TABLE sessions (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ended_at INTEGER NOT NULL,   -- unix seconds
+    minutes  INTEGER NOT NULL,
+    label    TEXT    NOT NULL
+);
+CREATE TABLE labels (name TEXT PRIMARY KEY, color TEXT NOT NULL);
+```
+
+A row is written only when a focus block **completes**. Skipping or resetting
+records nothing.
+
+## Stats
+
+`stats.py` serves two routes on `127.0.0.1`, on an ephemeral port:
+
+- `/` — server-rendered HTML. No JavaScript, no CDN, works offline.
+- `/data.json` — the same numbers as JSON.
+
+The port is written to `~/.local/share/pomodoro/port`.
+
+Metrics: today, this week (Monday start), this month, all time, day streak,
+last 14 days, minutes per label, 25 most recent sessions.
+
+## Notes
+
+- One daemon only. `Gtk.Application` with a fixed app id enforces this through
+  D-Bus; a second launch exits and forwards.
+- The socket listener is non-blocking with a sleep, so it can never spin.
+- The 1 s tick only writes state and redraws while a session is running.
+  Idle cost is ~0%. Panel open costs ~0.3% of one core.
+- The UI never talks to the socket. Buttons call functions in-process, so the
+  panel cannot become unresponsive if the socket dies.
+
+## Licence
+
+MIT. The session and stats model is derived from
+[sasa95/pomodor](https://github.com/sasa95/pomodor), also MIT.
