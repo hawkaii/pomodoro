@@ -168,8 +168,7 @@ def cmd_toggle():
 
 def cmd_open():
     _log("cmd_open")
-    if S["phase"] == "idle":
-        cmd_start()
+    # Opening is not starting. Nothing runs until START is pressed.
     S["panel_open"] = True
     save()
     sync_ui()
@@ -192,6 +191,19 @@ def cmd_start():
     S["updated_at"] = now()
     save()
     sync_ui()
+
+
+def cmd_primary():
+    """The middle button: start when idle, pause when running, resume when paused."""
+    if S["phase"] == "idle":
+        cmd_start()
+    elif S["running"]:
+        cmd_pause()
+    else:
+        S["running"] = True
+        S["updated_at"] = now()
+        save()
+        sync_ui()
 
 
 def cmd_pause():
@@ -329,6 +341,7 @@ def dispatch(cmd):
         "toggle": cmd_toggle, "open": cmd_open, "close": cmd_close,
         "start": cmd_start, "pause": cmd_pause, "reset": cmd_reset,
         "skip": cmd_skip, "label": cmd_cycle_label, "stats": open_stats,
+        "primary": cmd_primary,
     }
     if cmd in handlers:
         handlers[cmd]()
@@ -397,6 +410,35 @@ def set_panel(up):
         win.set_visible(False)
 
 
+def phase_text():
+    return {"focus": "FOCUS", "break": "BREAK",
+            "longbreak": "LONG BREAK", "idle": "READY"}.get(S["phase"], "READY")
+
+
+def ring_rgb():
+    if S["phase"] in ("break", "longbreak"):
+        return (0.537, 0.706, 0.980)      # ice blue
+    if S["phase"] == "idle":
+        return (0.35, 0.35, 0.35)
+    return (0.855, 0.161, 0.110)          # accent red
+
+
+def draw_ring(area, cr, width, height):
+    import math
+    cx, cy = width / 2.0, height / 2.0
+    r = max(10.0, min(width, height) / 2.0 - 8)
+    cr.set_line_width(9)
+    cr.set_line_cap(1)                    # cairo ROUND_CAP
+    cr.set_source_rgb(0.14, 0.14, 0.14)
+    cr.arc(cx, cy, r, 0, 2 * math.pi)
+    cr.stroke()
+    frac = max(0.0, min(1.0, W.get("frac", 0.0)))
+    if frac > 0.002:
+        cr.set_source_rgb(*W.get("ring_color", (0.855, 0.161, 0.110)))
+        cr.arc(cx, cy, r, -math.pi / 2, -math.pi / 2 + 2 * math.pi * frac)
+        cr.stroke()
+
+
 def sync_ui(force=False):
     if not W:
         return
@@ -406,13 +448,29 @@ def sync_ui(force=False):
     rem = S["remaining_s"]
     if S["running"]:
         rem = max(0, rem - (now() - S["updated_at"]))
+
     W["digits"].set_text(fmt(rem))
+    W["phase"].set_text(phase_text())
     W["root"].set_css_classes([phase_css()])
+
     d = phase_dur()
-    frac = (1.0 - min(1.0, rem / d)) if d > 0 else 1.0
-    W["bar"].set_value(frac)
+    W["frac"] = (rem / d) if d > 0 else 0.0
+    W["ring_color"] = ring_rgb()
+    W["ring"].queue_draw()
+
+    n = max(1, int(S["cfg"]["every"]))
+    done = max(0, min(int(S["breaks"]), n))
+    W["rounds"].set_markup(
+        f'<span foreground="#DA291C">{"● " * done}</span>'
+        f'<span foreground="#3d3d3d">{"● " * (n - done)}</span>'
+    )
+
+    W["primary"].set_label("START" if S["phase"] == "idle"
+                           else ("PAUSE" if S["running"] else "RESUME"))
+
     for key, w in W["steppers"].items():
         w["val"].set_text(str(S["cfg"][key]))
+
     W["label"].set_label(S.get("label") or "focus")
     W["auto"].set_label("AUTO")
     if S["auto"]:
@@ -441,11 +499,9 @@ def stepper(box, key, label, value):
 def build_ui(win):
     W["steppers"] = {}
     root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, name="pomodoro-panel")
-    root.set_margin_top(10)
-    root.set_margin_bottom(10)
-    root.set_margin_start(10)
-    root.set_margin_end(10)
-    root.set_size_request(272, -1)
+    for side in ("top", "bottom", "start", "end"):
+        getattr(root, f"set_margin_{side}")(12)
+    root.set_size_request(296, -1)
     W["root"] = root
     win.set_child(root)
 
@@ -461,11 +517,37 @@ def build_ui(win):
     close.connect("clicked", lambda bb: cmd_close())
     head.append(close)
 
-    W["digits"] = Gtk.Label(name="pomodoro-digits", halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
-    root.append(W["digits"])
+    # countdown inside a progress ring, Pomodor style
+    overlay = Gtk.Overlay(name="pomodoro-ringwrap")
+    root.append(overlay)
+    W["ring"] = Gtk.DrawingArea(name="pomodoro-ring")
+    W["ring"].set_size_request(152, 152)
+    W["ring"].set_draw_func(draw_ring)
+    overlay.set_child(W["ring"])
 
-    W["bar"] = Gtk.LevelBar(name="pomodoro-bar", orientation=Gtk.Orientation.HORIZONTAL)
-    root.append(W["bar"])
+    mid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0,
+                  halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+    mid.set_can_target(False)
+    W["digits"] = Gtk.Label(name="pomodoro-digits", halign=Gtk.Align.CENTER)
+    W["phase"] = Gtk.Label(name="pomodoro-phase", halign=Gtk.Align.CENTER)
+    mid.append(W["digits"])
+    mid.append(W["phase"])
+    overlay.add_overlay(mid)
+
+    W["rounds"] = Gtk.Label(name="pomodoro-rounds", halign=Gtk.Align.CENTER)
+    root.append(W["rounds"])
+
+    controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, name="pomodoro-controls")
+    root.append(controls)
+    reset = Gtk.Button(label="RESET", name="pomodoro-btn")
+    reset.connect("clicked", lambda bb: cmd_reset())
+    W["primary"] = Gtk.Button(label="START", name="pomodoro-btn", css_classes=["primary"])
+    W["primary"].connect("clicked", lambda bb: cmd_primary())
+    skip = Gtk.Button(label="SKIP", name="pomodoro-btn")
+    skip.connect("clicked", lambda bb: cmd_skip())
+    controls.append(reset)
+    controls.append(W["primary"])
+    controls.append(skip)
 
     rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, name="pomodoro-rows")
     root.append(rows)
@@ -474,19 +556,12 @@ def build_ui(win):
     stepper(rows, "long", LABELS["long"], S["cfg"]["long"])
     stepper(rows, "every", LABELS["every"], S["cfg"]["every"])
 
-    lab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2, name="pomodoro-labelrow")
+    lab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4, name="pomodoro-labelrow")
     root.append(lab)
     lab.append(Gtk.Label(label="LABEL", name="steplabel", halign=Gtk.Align.START, hexpand=True))
     W["label"] = Gtk.Button(name="stepbtn")
     W["label"].connect("clicked", lambda bb: cmd_cycle_label())
     lab.append(W["label"])
-
-    controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4, name="pomodoro-controls")
-    root.append(controls)
-    for label, fn in (("START", cmd_start), ("RESET", cmd_reset), ("SKIP", cmd_skip)):
-        b = Gtk.Button(label=label, name="pomodoro-btn")
-        b.connect("clicked", lambda bb, f=fn: f())
-        controls.append(b)
 
     W["stats"] = Gtk.Button(label="STATS", name="pomodoro-stats", halign=Gtk.Align.CENTER)
     W["stats"].connect("clicked", lambda bb: open_stats())
@@ -498,85 +573,82 @@ def build_ui(win):
 CSS = """
 #pomodoro-panel {
 	background-color: #0d0d0d;
-	border: 1px solid #2a2a2a;
-	border-radius: 14px;
-	padding: 10px;
+	border: 1px solid #242424;
+	border-radius: 18px;
+	padding: 12px;
 	font-family: "JetBrainsMono Nerd Font";
 	font-weight: bold;
 	font-size: 13px;
 }
-#pomodoro-head { margin-bottom: 2px; }
-#pomodoro-penguin { font-size: 15px; }
-#pomodoro-title { color: #777777; font-size: 11px; letter-spacing: 2px; }
-#pomodoro-digits { color: #ffffff; font-size: 42px; font-weight: bold; margin: 2px 0 0 0; }
-#pomodoro-panel.pomodoro-focus #pomodoro-digits { color: #ffffff; }
+#pomodoro-title { color: #8a8a8a; font-size: 11px; letter-spacing: 3px; }
+#pomodoro-digits { color: #ffffff; font-size: 34px; font-weight: bold; }
+#pomodoro-phase { color: #8a8a8a; font-size: 10px; letter-spacing: 3px; margin-top: 1px; }
 #pomodoro-panel.pomodoro-break #pomodoro-digits { color: #89b4fa; }
 #pomodoro-panel.pomodoro-paused #pomodoro-digits { color: #666666; }
-#pomodoro-panel.pomodoro-idle #pomodoro-digits { color: #bbbbbb; }
-#pomodoro-bar { background-color: transparent; border: none; margin: 2px 0 8px 0; }
-#pomodoro-bar trough { background-color: #222222; border-radius: 2px; min-height: 4px; }
-#pomodoro-bar block.filled { background-color: #DA291C; border-radius: 2px; }
-#pomodoro-bar block.empty { background-color: transparent; }
-#pomodoro-rows { margin: 0 0 8px 0; }
-#steplabel { min-width: 62px; color: #777777; font-size: 11px; letter-spacing: 1px; }
+#pomodoro-panel.pomodoro-idle #pomodoro-digits { color: #cfcfcf; }
+#pomodoro-rounds { font-size: 11px; margin: 2px 0 4px 0; }
+#pomodoro-controls { margin: 2px 0 8px 0; }
+#pomodoro-btn {
+	background-color: #1c1c1c;
+	color: #e8e8e8;
+	border: none;
+	border-radius: 16px;
+	font-size: 11px;
+	letter-spacing: 1.5px;
+	min-height: 30px;
+	padding: 0 10px;
+}
+#pomodoro-btn:hover { background-color: #2a2a2a; }
+#pomodoro-btn.primary { background-color: #DA291C; color: #ffffff; }
+#pomodoro-btn.primary:hover { background-color: #f03a2c; }
+#pomodoro-rows { margin: 0 0 6px 0; }
+#steplabel { min-width: 74px; color: #8a8a8a; font-size: 10px; letter-spacing: 2px; }
 #stepval { min-width: 26px; color: #ffffff; font-size: 13px; }
 #stepbtn {
-	background-color: transparent;
-	color: #777777;
-	border: none;
-	border-radius: 8px;
-	font-size: 14px;
-	min-width: 24px;
-	min-height: 24px;
-	padding: 0;
-}
-#stepbtn:hover { background-color: #1a1a1a; color: #ffffff; }
-#pomodoro-btn {
-	color: #ffffff;
-	background-color: #1a1a1a;
+	background-color: #1c1c1c;
+	color: #cfcfcf;
 	border: none;
 	border-radius: 10px;
-	font-size: 11px;
-	letter-spacing: 1px;
-	min-height: 28px;
-	padding: 0 8px;
+	font-size: 13px;
+	min-width: 24px;
+	min-height: 24px;
+	padding: 0 6px;
 }
-#pomodoro-btn:hover { background-color: #DA291C; color: #ffffff; }
+#stepbtn:hover { background-color: #2a2a2a; color: #ffffff; }
 #pomodoro-auto {
-	color: #555555;
+	color: #4a4a4a;
 	background-color: transparent;
 	border: none;
-	border-radius: 8px;
+	border-radius: 10px;
 	font-size: 10px;
-	letter-spacing: 1px;
+	letter-spacing: 1.5px;
 	min-height: 22px;
 	padding: 0 6px;
 }
 #pomodoro-auto.on { color: #DA291C; }
-#pomodoro-auto:hover { background-color: #1a1a1a; }
+#pomodoro-auto:hover { background-color: #1c1c1c; }
 #pomodoro-close {
 	color: #777777;
 	background-color: transparent;
 	border: none;
-	border-radius: 8px;
+	border-radius: 10px;
 	font-size: 12px;
 	min-width: 24px;
 	min-height: 22px;
 	padding: 0;
 }
-#pomodoro-close:hover { background-color: #1a1a1a; color: #DA291C; }
+#pomodoro-close:hover { background-color: #1c1c1c; color: #DA291C; }
 #pomodoro-stats {
 	color: #8a8a8a;
 	background-color: transparent;
 	border: none;
-	border-radius: 8px;
+	border-radius: 10px;
 	font-size: 10px;
 	letter-spacing: 2px;
 	min-height: 22px;
-	padding: 0 6px;
-	margin-top: 2px;
+	padding: 0 8px;
 }
-#pomodoro-stats:hover { background-color: #1a1a1a; color: #DA291C; }
+#pomodoro-stats:hover { background-color: #1c1c1c; color: #DA291C; }
 """
 
 _prov = Gtk.CssProvider()

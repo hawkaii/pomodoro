@@ -62,14 +62,17 @@ def status():
             d = json.load(f)
     except Exception:
         return {"text": PENGUIN, "class": ["pomodoro-idle"]}
-    rem = max(0.0, d.get("remaining_s", 0) - (time.time() - d.get("updated_at", 0)))
     phase, going = d.get("phase", "idle"), d.get("running", False)
+    # Only a running timer drains. A paused timer keeps its frozen value.
+    rem = d.get("remaining_s", 0)
+    if going:
+        rem = max(0.0, rem - (time.time() - d.get("updated_at", 0)))
     if phase == "idle" and not going:
         return {"text": PENGUIN, "class": ["pomodoro-idle"]}
+    if not going:
+        return {"text": fmt(rem), "class": ["pomodoro-paused"]}
     cls = {"focus": "pomodoro-focus", "break": "pomodoro-break",
-           "longbreak": "pomodoro-break"}.get(phase)
-    if cls is None:
-        cls = "pomodoro-paused" if not going else "pomodoro-focus"
+           "longbreak": "pomodoro-break"}.get(phase, "pomodoro-focus")
     return {"text": fmt(rem), "class": [cls]}
 
 

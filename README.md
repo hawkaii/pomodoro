@@ -15,7 +15,10 @@ running  [ 19:58 ]        same red box, countdown replaces the glyph
 
 - **Bar**: one module, styled exactly like the `custom/distro` box it replaces
   (red `@accent` background, dark foreground, 20 px icon / 14 px countdown).
-- **Panel**: 292 px wide, dark `#0d0d0d`, rounded, JetBrainsMono, red accent.
+- **Panel**: 320 px wide, dark `#0d0d0d`, rounded 18 px, JetBrainsMono.
+  The countdown sits inside a Cairo progress ring that drains as the block
+  runs, like Pomodor's circle. Round dots under it show progress through the
+  cycle. Red while focusing, ice blue on a break, grey when idle.
   Opens at the top-right of the focused monitor.
 - **Stats**: dark page, four stat cards, a 14-day bar chart, a per-label
   breakdown and the 25 most recent sessions.
@@ -84,8 +87,9 @@ hyprctl reload
 
 | Action | Result |
 |---|---|
-| Left click the box | Opens the panel. Starts a focus block if idle. |
-| `✕` | Hides the panel. The box keeps counting down. |
+| Left click the box | Opens the panel. **Does not start anything.** |
+| `START` / `PAUSE` / `RESUME` | One primary button, changes with the state. |
+| `✕` | Hides the panel. A running timer keeps counting down. |
 | Right click the box | Pause / resume without opening the panel |
 | Middle click the box | Reset |
 | `STATS` in the panel | Opens `http://127.0.0.1:<port>/` in your browser |
@@ -100,7 +104,7 @@ Every panel action is also a socket command, so you can bind them to keys:
 
 ```bash
 ~/.config/pomodoro-mc/waybar/pomodoro toggle   # also: open close start pause
-                                               # reset skip label stats
+                                               # reset skip label stats primary
 ```
 
 
