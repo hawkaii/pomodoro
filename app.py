@@ -33,6 +33,7 @@ import stats
 
 PORT = 0
 ALARM_PROC = None
+ALARM_NOTIFY = None
 SAMPLE_SECS = 5
 PRIVATE_APPS = ("keepassxc", "bitwarden", "1password", "gnome-keyring")
 
@@ -180,7 +181,12 @@ def alarm_start():
 
 
 def alarm_stop():
-    global ALARM_PROC
+    global ALARM_PROC, ALARM_NOTIFY
+    if ALARM_NOTIFY:
+        try:
+            ALARM_NOTIFY.kill()
+        except Exception:
+            pass
     if not ALARM_PROC:
         return
     try:
@@ -194,18 +200,34 @@ def alarm_stop():
 
 
 def notify_alarm(title, body):
-    """Critical notification. If the daemon reports a click, dismiss the alarm."""
+    """Critical notification. If the daemon reports a click, dismiss the alarm.
+
+    Bounded to 3 minutes and killed on dismiss — an unbounded --wait left a
+    blocked thread and two descriptors behind for every block.
+    """
+    global ALARM_NOTIFY
+
     def run():
+        global ALARM_NOTIFY
         try:
-            r = subprocess.run(
+            ALARM_NOTIFY = subprocess.Popen(
                 ["notify-send", "-u", "critical", "-a", "pomodoro",
                  "-A", "default=Dismiss", title, body],
-                capture_output=True, text=True, timeout=600,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             )
-            if r.returncode == 0 and r.stdout.strip():
+            out, _ = ALARM_NOTIFY.communicate(timeout=180)
+            if out and out.strip():
                 GLib.idle_add(lambda: (cmd_dismiss(), False)[1])
+        except subprocess.TimeoutExpired:
+            try:
+                ALARM_NOTIFY.kill()
+            except Exception:
+                pass
         except Exception as exc:
             _log("notify_alarm failed:", exc)
+        finally:
+            ALARM_NOTIFY = None
+
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -465,6 +487,16 @@ def cmd_set_auto(on):
 
 
 def on_tick():
+    # A raise here would make GLib drop the timeout and freeze the clock
+    # forever, so nothing may escape.
+    try:
+        return _tick()
+    except Exception as exc:
+        _log("tick failed:", exc)
+        return True
+
+
+def _tick():
     if S["running"] and S["phase"] != "idle":
         S["remaining_s"] -= 1
         S["updated_at"] = now()

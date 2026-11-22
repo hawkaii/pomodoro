@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import closing
 import threading
 import time
 from datetime import date, datetime, timedelta
@@ -33,11 +34,20 @@ PORT_FILE = os.path.join(DATA_DIR, "port")
 _lock = threading.Lock()
 
 
+def _db():
+    """A connection that is actually closed on exit.
+
+    `with sqlite3.connect(...)` only commits — it does not close — and that
+    leaked one file descriptor per call until the process hit its fd limit.
+    """
+    return closing(sqlite3.connect(DB_PATH))
+
+
 # ---------------------------------------------------------------- storage
 
 def init_db() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as db:
+    with _db() as db:
         db.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +83,7 @@ def record(minutes: int, label: str = "focus", ended_at: int | None = None,
            sref: str | None = None) -> None:
     if minutes <= 0:
         return
-    with _lock, sqlite3.connect(DB_PATH) as db:
+    with _lock, _db() as db:
         db.execute(
             "INSERT INTO sessions(ended_at, minutes, label, sref) VALUES (?, ?, ?, ?)",
             (ended_at or int(time.time()), int(minutes), label or "focus", sref),
@@ -83,7 +93,7 @@ def record(minutes: int, label: str = "focus", ended_at: int | None = None,
 def add_activity(sref: str, app: str, title: str, seconds: int) -> None:
     if not sref or seconds <= 0:
         return
-    with _lock, sqlite3.connect(DB_PATH) as db:
+    with _lock, _db() as db:
         db.execute(
             "INSERT INTO activity(sref, app, title, seconds) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(sref, app, title) DO UPDATE SET seconds = seconds + excluded.seconds",
@@ -94,12 +104,12 @@ def add_activity(sref: str, app: str, title: str, seconds: int) -> None:
 def discard_activity(sref: str | None) -> None:
     if not sref:
         return
-    with _lock, sqlite3.connect(DB_PATH) as db:
+    with _lock, _db() as db:
         db.execute("DELETE FROM activity WHERE sref = ?", (sref,))
 
 
 def labels() -> list[tuple[str, str]]:
-    with sqlite3.connect(DB_PATH) as db:
+    with _db() as db:
         rows = db.execute("SELECT name, color FROM labels ORDER BY rowid").fetchall()
     return rows or DEFAULT_LABELS
 
@@ -115,7 +125,7 @@ def collect(days: int = 14) -> dict:
     week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
 
-    with sqlite3.connect(DB_PATH) as db:
+    with _db() as db:
         def total(since: int | None):
             q = "SELECT COALESCE(SUM(minutes),0), COUNT(*) FROM sessions"
             if since is None:
@@ -225,7 +235,7 @@ def read_live():
     sref = d.get("sref")
     if sref:
         try:
-            with sqlite3.connect(DB_PATH) as db:
+            with _db() as db:
                 r = db.execute(
                     "SELECT app, title FROM activity WHERE sref=? ORDER BY seconds DESC LIMIT 1",
                     (sref,)).fetchone()
