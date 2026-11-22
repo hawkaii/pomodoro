@@ -164,6 +164,44 @@ records nothing, so an empty page means no block has finished yet.
 Metrics: today, this week (Monday start), this month, all time, day streak,
 last 14 days, minutes per label, 25 most recent sessions.
 
+## What you worked on
+
+While a focus block runs, the daemon samples the focused window every 5 s and
+records the app and the tab title. Nothing is sampled on a break, when paused,
+or while the alarm rings.
+
+```sql
+CREATE TABLE activity (
+    sref    TEXT NOT NULL,   -- links a block to its samples
+    app     TEXT NOT NULL,   -- window class
+    title   TEXT NOT NULL,   -- cleaned title
+    seconds INTEGER NOT NULL,
+    PRIMARY KEY (sref, app, title)
+);
+```
+
+`seconds` accumulates, so a 20-minute block writes a handful of rows, not 240.
+Activity is joined to `sessions.sref`, so a block you reset or skipped never
+reaches the page — and its samples are deleted on reset.
+
+Titles are cleaned per app, because the window title is the only source that
+works without a browser extension:
+
+```
+firefox   "Need advice : r/kolkata — Original profile — Mozilla Firefox"
+          -> "Need advice : r/kolkata"
+helium    "New Tab - Helium"                        -> "New Tab"
+obsidian  "Drawing … - vault - Obsidian 1.15.1"     -> "Drawing …"
+ghostty   "hawkaii-IdeaPad: projects"               -> "projects"
+mpv       "camera-2026-11-22.mkv - mpv"             -> "camera-2026-11-22.mkv"
+```
+
+URLs are **not** recorded. The address bar is not observable without a browser
+extension, so the page shows the tab title only.
+
+Password managers (`keepassxc`, `bitwarden`, `1password`, `gnome-keyring`) store
+the app class and nothing else.
+
 ## Notes
 
 - One daemon only. `Gtk.Application` with a fixed app id enforces this through

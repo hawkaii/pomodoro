@@ -18,12 +18,14 @@ gi.require_version("GLib", "2.0")
 import atexit
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+import uuid
 
 from gi.repository import Gdk, GLib, Gtk
 
@@ -31,6 +33,8 @@ import stats
 
 PORT = 0
 ALARM_PROC = None
+SAMPLE_SECS = 5
+PRIVATE_APPS = ("keepassxc", "bitwarden", "1password", "gnome-keyring")
 
 XDG = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
 SOCK = os.path.join(XDG, "pomodoro.sock")
@@ -55,6 +59,8 @@ S = {
     "auto": True,
     "label": "focus",
     "alarm": False,
+    "sref": None,
+    "ticks": 0,
     "updated_at": 0.0,
 }
 
@@ -203,6 +209,55 @@ def notify_alarm(title, body):
     threading.Thread(target=run, daemon=True).start()
 
 
+def new_sref():
+    return uuid.uuid4().hex[:12]
+
+
+def clean_title(app, title):
+    """Turn a window title into a readable label, per app."""
+    t = (title or "").strip()
+    a = (app or "").lower()
+    if "firefox" in a:
+        t = re.sub(r"\s+[\u2014\u2013-]\s+.*?Mozilla Firefox\s*$", "", t)
+    if any(x in a for x in ("helium", "chromium", "chrome", "brave", "edge")):
+        t = re.sub(r"\s+-\s+(Helium|Chromium|Google Chrome|Brave|Microsoft Edge)\s*$",
+                   "", t, flags=re.I)
+    if "obsidian" in a:
+        t = re.sub(r"\s+-\s+.*?\s+-\s+Obsidian\s+[\d.]+\s*$", "", t)
+    if "mpv" in a:
+        t = re.sub(r"\s+-\s+mpv\s*$", "", t)
+    if any(x in a for x in ("vlc", "celluloid", "totem")):
+        t = re.sub(r"\s+-\s+(VLC media player|Celluloid|Videos)\s*$", "", t, flags=re.I)
+    if any(x in a for x in ("ghostty", "kitty", "alacritty", "foot", "wezterm")):
+        if ": " in t:
+            t = t.split(": ", 1)[1]
+    return (t or app or "unknown")[:120]
+
+
+def sample_activity():
+    """Record what has focus, but only while a focus block is running."""
+    if not (S["phase"] == "focus" and S["running"] and not S.get("alarm")):
+        return
+    sref = S.get("sref")
+    if not sref:
+        return
+    try:
+        out = subprocess.run(["hyprctl", "activewindow", "-j"],
+                             capture_output=True, timeout=2, text=True)
+        d = json.loads(out.stdout or "{}")
+    except Exception:
+        return
+    cls = (d.get("class") or "").strip()
+    if not cls or cls == APP_ID:
+        return
+    low = cls.lower()
+    title = cls if any(p in low for p in PRIVATE_APPS) else clean_title(cls, d.get("title"))
+    try:
+        stats.add_activity(sref, cls, title, SAMPLE_SECS)
+    except Exception as exc:
+        _log("activity sample failed:", exc)
+
+
 def notify(title, body):
     try:
         subprocess.Popen(["notify-send", "-a", "pomodoro", title, body],
@@ -276,6 +331,8 @@ def cmd_start():
     if S["phase"] == "idle":
         S["phase"] = "focus"
         S["remaining_s"] = S["cfg"]["focus"] * 60
+    if S["phase"] == "focus" and not S.get("sref"):
+        S["sref"] = new_sref()
     S["running"] = True
     S["updated_at"] = now()
     save()
@@ -305,9 +362,14 @@ def cmd_pause():
 
 
 def cmd_reset():
+    try:
+        stats.discard_activity(S.get("sref"))
+    except Exception as exc:
+        _log("discard failed:", exc)
     S["phase"] = "idle"
     S["running"] = False
     S["remaining_s"] = 0
+    S["sref"] = None
     save()
     sync_ui()
 
@@ -329,9 +391,15 @@ def advance(record=True, ring=True):
     ring=False -> SKIP was pressed: move on without an alarm or a saved block.
     """
     if S["phase"] == "focus":
+        if not record:
+            try:
+                stats.discard_activity(S.get("sref"))
+            except Exception as exc:
+                _log("discard failed:", exc)
         if record:
             try:
-                stats.record(S["cfg"]["focus"], S.get("label") or "focus")
+                stats.record(S["cfg"]["focus"], S.get("label") or "focus",
+                             sref=S.get("sref"))
             except Exception as exc:      # stats must never break the timer
                 _log("stats.record failed:", exc)
         S["sessions"] += 1
@@ -345,8 +413,12 @@ def advance(record=True, ring=True):
     elif S["phase"] in ("break", "longbreak"):
         S["phase"] = "focus"
         S["remaining_s"] = S["cfg"]["focus"] * 60
+        S["sref"] = new_sref()
     else:
         return
+
+    if S["phase"] in ("break", "longbreak"):
+        S["sref"] = None
 
     S["updated_at"] = now()
     if ring:
@@ -400,6 +472,9 @@ def on_tick():
             advance()
         save()          # only write while a session is actually running
         sync_ui()
+        S["ticks"] = S.get("ticks", 0) + 1
+        if S["ticks"] % SAMPLE_SECS == 0:
+            sample_activity()
     return True
 
 

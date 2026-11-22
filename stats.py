@@ -47,6 +47,18 @@ def init_db() -> None:
             )
         """)
         db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at)")
+        cols = [r[1] for r in db.execute("PRAGMA table_info(sessions)")]
+        if "sref" not in cols:
+            db.execute("ALTER TABLE sessions ADD COLUMN sref TEXT")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS activity (
+                sref    TEXT NOT NULL,
+                app     TEXT NOT NULL,
+                title   TEXT NOT NULL,
+                seconds INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (sref, app, title)
+            )
+        """)
         db.execute("""
             CREATE TABLE IF NOT EXISTS labels (
                 name  TEXT PRIMARY KEY,
@@ -57,14 +69,33 @@ def init_db() -> None:
             db.execute("INSERT OR IGNORE INTO labels(name, color) VALUES (?, ?)", (name, color))
 
 
-def record(minutes: int, label: str = "focus", ended_at: int | None = None) -> None:
+def record(minutes: int, label: str = "focus", ended_at: int | None = None,
+           sref: str | None = None) -> None:
     if minutes <= 0:
         return
     with _lock, sqlite3.connect(DB_PATH) as db:
         db.execute(
-            "INSERT INTO sessions(ended_at, minutes, label) VALUES (?, ?, ?)",
-            (ended_at or int(time.time()), int(minutes), label or "focus"),
+            "INSERT INTO sessions(ended_at, minutes, label, sref) VALUES (?, ?, ?, ?)",
+            (ended_at or int(time.time()), int(minutes), label or "focus", sref),
         )
+
+
+def add_activity(sref: str, app: str, title: str, seconds: int) -> None:
+    if not sref or seconds <= 0:
+        return
+    with _lock, sqlite3.connect(DB_PATH) as db:
+        db.execute(
+            "INSERT INTO activity(sref, app, title, seconds) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(sref, app, title) DO UPDATE SET seconds = seconds + excluded.seconds",
+            (sref, app[:64], title[:160], int(seconds)),
+        )
+
+
+def discard_activity(sref: str | None) -> None:
+    if not sref:
+        return
+    with _lock, sqlite3.connect(DB_PATH) as db:
+        db.execute("DELETE FROM activity WHERE sref = ?", (sref,))
 
 
 def labels() -> list[tuple[str, str]]:
@@ -116,6 +147,15 @@ def collect(days: int = 14) -> dict:
             "SELECT ended_at, minutes, label FROM sessions ORDER BY ended_at DESC LIMIT 25"
         ).fetchall()
 
+        # only activity whose block was actually saved counts
+        rows = db.execute("""
+            SELECT a.app, a.title, SUM(a.seconds)
+            FROM activity a JOIN sessions s ON s.sref = a.sref
+            WHERE a.seconds > 0
+            GROUP BY a.app, a.title
+            ORDER BY 3 DESC
+        """).fetchall()
+
         # streak: consecutive days with at least one session, ending today
         streak = 0
         for i in range(0, 400):
@@ -130,8 +170,16 @@ def collect(days: int = 14) -> dict:
             elif i > 0 or True:
                 break
 
+    apps = {}
+    for app_name, title, secs in rows:
+        e = apps.setdefault(app_name, {"app": app_name, "seconds": 0, "titles": []})
+        e["seconds"] += secs
+        e["titles"].append({"title": title, "seconds": secs})
+    app_list = sorted(apps.values(), key=lambda x: -x["seconds"])
+
     colors = dict(labels())
     return {
+        "apps": app_list,
         "generated": datetime.now().strftime("%a %d %b %Y, %H:%M"),
         "today": {"minutes": today_min, "sessions": today_n},
         "week": {"minutes": week_min, "sessions": week_n},
@@ -173,10 +221,63 @@ def read_live():
     if not dur:
         return None
     elapsed = max(0.0, dur * 60 - left)
-    return {"phase": phase, "running": bool(d.get("running")),
+    now_app = None
+    sref = d.get("sref")
+    if sref:
+        try:
+            with sqlite3.connect(DB_PATH) as db:
+                r = db.execute(
+                    "SELECT app, title FROM activity WHERE sref=? ORDER BY seconds DESC LIMIT 1",
+                    (sref,)).fetchone()
+            if r:
+                now_app = f"{r[0]} — {r[1]}"
+        except Exception:
+            pass
+    return {"app": now_app, "phase": phase, "running": bool(d.get("running")),
             "alarm": bool(d.get("alarm")), "label": d.get("label") or "focus",
             "elapsed_min": int(elapsed // 60), "elapsed_s": int(elapsed % 60),
             "left": int(left)}
+
+
+ICONS = {
+    "browser": '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.6 3 14.4 0 18M12 3c-3 3.6-3 14.4 0 18"/></svg>',
+    "terminal": '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7.5 9.5l3 2.5-3 2.5M13 15h4"/></svg>',
+    "note": '<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 13h6M9 17h4"/></svg>',
+    "music": '<svg viewBox="0 0 24 24"><path d="M9 17V6l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>',
+    "video": '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10.5 9.5l4.5 2.5-4.5 2.5z"/></svg>',
+    "code": '<svg viewBox="0 0 24 24"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></svg>',
+    "chat": '<svg viewBox="0 0 24 24"><path d="M4 5h16v11H9.5L4 20z"/></svg>',
+    "folder": '<svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>',
+    "generic": '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/></svg>',
+}
+
+APP_ICON_RULES = [
+    ("browser", ("firefox", "helium", "chromium", "chrome", "brave", "edge", "browser")),
+    ("terminal", ("ghostty", "kitty", "alacritty", "foot", "wezterm", "terminal", "konsole")),
+    ("folder", ("nautilus", "thunar", "dolphin", "nemo", "pcmanfm", "files")),
+    ("note", ("obsidian", "notes", "logseq", "joplin")),
+    ("music", ("spotifast", "spotify", "music", "rhythmbox", "feishin")),
+    ("video", ("obsproject", "studio", "video", "mpv", "vlc", "celluloid", "totem")),
+    ("code", ("code", "cursor", "neovim", "nvim", "idea", "pycharm", "sublime")),
+    ("chat", ("discord", "slack", "telegram", "signal", "element")),
+]
+
+
+def icon_for(app: str) -> str:
+    a = (app or "").lower()
+    for key, needles in APP_ICON_RULES:
+        if any(n in a for n in needles):
+            return ICONS[key]
+    return ICONS["generic"]
+
+
+def _dur(seconds: int) -> str:
+    sec = int(seconds)
+    if sec < 60:
+        return f"{sec}s"
+    h, rest = divmod(sec, 3600)
+    m = rest // 60
+    return f"{h}h {m:02d}m" if h else f"{m}m"
 
 
 def _hm(minutes: int) -> str:
@@ -235,11 +336,29 @@ def render_html() -> str:
             f'<div class="now{" alarm" if live["alarm"] else ""}">'
             f'<span class="live-dot"></span>'
             f'<b>{label}</b> {state} &middot; {live["elapsed_min"]}m {live["elapsed_s"]:02d}s elapsed'
-            f' &middot; {m}:{sec:02d} left &middot; label {live["label"]}'
+            f' &middot; {m}:{sec:02d} left &middot; {live.get("app") or live["label"]}'
             f'<span class="hint">saved when the block reaches zero</span></div>'
         )
     else:
         now_html = ""
+
+    if d["apps"]:
+        total_sec = sum(a["seconds"] for a in d["apps"]) or 1
+        apps_html = ""
+        for a in d["apps"][:8]:
+            pct = max(2, int(a["seconds"] / total_sec * 100))
+            sub = "".join(
+                f'<div class="trow"><span class="ttl">{t["title"]}</span>'
+                f'<span class="tmin">{_dur(t["seconds"])}</span></div>'
+                for t in a["titles"][:3])
+            apps_html += (
+                f'<div class="arow"><span class="ico">{icon_for(a["app"])}</span>'
+                f'<span class="aname">{a["app"]}</span>'
+                f'<span class="abar"><i style="width:{pct}%"></i></span>'
+                f'<span class="aval">{_dur(a["seconds"])}</span></div>{sub}')
+    else:
+        apps_html = ('<div class="empty">Nothing yet. Activity is sampled every 5 s '
+                     'while a focus block runs.</div>')
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -286,6 +405,17 @@ def render_html() -> str:
          border-radius:12px; padding:12px 16px; margin-bottom:12px; color:#ddd; }}
   .now.alarm {{ border-left-color:#ffffff; background:#1d1010; }}
   .now b {{ color:#fff; letter-spacing:1.5px; }}
+  .arow {{ display:flex; align-items:center; gap:10px; margin-bottom:6px; }}
+  .ico {{ width:16px; height:16px; flex:none; display:inline-flex; }}
+  .ico svg {{ width:16px; height:16px; stroke:#8a8a8a; fill:none; stroke-width:1.6;
+              stroke-linecap:round; stroke-linejoin:round; }}
+  .aname {{ width:190px; color:#ddd; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  .abar {{ flex:1; height:8px; background:#1e1e1e; border-radius:4px; overflow:hidden; }}
+  .abar i {{ display:block; height:100%; background:var(--accent); border-radius:4px; }}
+  .aval {{ width:70px; text-align:right; color:var(--muted); }}
+  .trow {{ display:flex; gap:10px; padding:1px 0 3px 26px; color:var(--muted); font-size:11.5px; }}
+  .trow .ttl {{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  .trow .tmin {{ width:70px; text-align:right; }}
   .now .hint {{ margin-left:auto; padding-left:14px; border-left:1px solid #2a2a2a;
                 color:var(--muted); font-size:11px; }}
   .live-dot {{ width:8px; height:8px; border-radius:50%; background:var(--accent);
@@ -299,6 +429,7 @@ def render_html() -> str:
 <div class="panel"><div class="pt">LAST 14 DAYS</div><div class="chart">{bars}</div>
   <div class="streak">Streak: {d["streak"]} day{"s" if d["streak"] != 1 else ""} in a row</div></div>
 <div class="panel"><div class="pt">BY LABEL</div>{labels_html}</div>
+<div class="panel"><div class="pt">WHAT YOU WORKED ON</div>{apps_html}</div>
 <div class="panel"><div class="pt">RECENT SESSIONS</div>
 <table>{recent_html}</table></div>
 </body></html>"""
