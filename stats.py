@@ -18,6 +18,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 DATA_DIR = os.path.expanduser("~/.local/share/pomodoro")
 DB_PATH = os.path.join(DATA_DIR, "history.db")
@@ -130,8 +131,9 @@ def _day_start(d: date) -> int:
     return int(datetime(d.year, d.month, d.day).timestamp())
 
 
-def collect(days: int = 14) -> dict:
+def collect(days: int = 14, day: date | None = None) -> dict:
     today = date.today()
+    day = day or today
     week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
 
@@ -167,14 +169,15 @@ def collect(days: int = 14) -> dict:
             "SELECT ended_at, minutes, label FROM sessions ORDER BY ended_at DESC LIMIT 25"
         ).fetchall()
 
-        # only activity whose block was actually saved counts
+        # activity for the selected day only: a block belongs to the day it ended
+        dstart = _day_start(day)
         rows = db.execute("""
             SELECT a.app, a.title, SUM(a.seconds)
             FROM activity a JOIN sessions s ON s.sref = a.sref
-            WHERE a.seconds > 0
+            WHERE a.seconds > 0 AND s.ended_at >= ? AND s.ended_at < ?
             GROUP BY a.app, a.title
             ORDER BY 3 DESC
-        """).fetchall()
+        """, (dstart, dstart + 86400)).fetchall()
 
         # streak: consecutive days with at least one session, ending today
         streak = 0
@@ -199,6 +202,8 @@ def collect(days: int = 14) -> dict:
 
     colors = dict(labels())
     return {
+        "day": day.isoformat(),
+        "day_label": "Today" if day == today else day.strftime("%a %d %b"),
         "apps": app_list,
         "generated": datetime.now().strftime("%a %d %b %Y, %H:%M"),
         "today": {"minutes": today_min, "sessions": today_n},
@@ -305,8 +310,10 @@ def _hm(minutes: int) -> str:
     return f"{h}h {m:02d}m" if h else f"{m}m"
 
 
-def render_html() -> str:
-    d = collect(14)
+def render_html(day: date | None = None) -> str:
+    today = date.today()
+    day = day or today
+    d = collect(14, day=day)
     live = read_live()
     peak = max([s["minutes"] for s in d["series"]] + [1])
 
@@ -377,8 +384,16 @@ def render_html() -> str:
                 f'<span class="abar"><i style="width:{pct}%"></i></span>'
                 f'<span class="aval">{_dur(a["seconds"])}</span></div>{sub}')
     else:
-        apps_html = ('<div class="empty">Nothing yet. Activity is sampled every 5 s '
-                     'while a focus block runs.</div>')
+        apps_html = ('<div class="empty">No app activity recorded on this day. '
+                     'It is sampled every 5 s while a focus block runs.</div>')
+
+    chips = ""
+    for i in range(6, -1, -1):
+        dd = today - timedelta(days=i)
+        href = "/" if dd == today else f"/?day={dd.isoformat()}"
+        cls = "chip active" if dd == day else "chip"
+        txt = "Today" if dd == today else dd.strftime("%a %d")
+        chips += f'<a class="{cls}" href="{href}">{txt}</a>' 
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -419,6 +434,11 @@ def render_html() -> str:
   tr:last-child td {{ border-bottom:none; }}
   .pill {{ background:#1e1e1e; border-radius:8px; padding:2px 8px; font-size:11px; }}
   .empty {{ color:var(--muted); }}
+  .days {{ display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }}
+  .chip {{ color:var(--muted); text-decoration:none; font-size:11px; letter-spacing:1px;
+           padding:5px 10px; border-radius:9px; background:#151515; border:1px solid #242424; }}
+  .chip:hover {{ color:#fff; border-color:#333; }}
+  .chip.active {{ color:#fff; background:#DA291C; border-color:#DA291C; }}
   .streak {{ color:var(--muted); font-size:12px; margin-top:8px; }}
   .now {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap;
          background:#161616; border:1px solid #2a2a2a; border-left:3px solid var(--accent);
@@ -449,7 +469,8 @@ def render_html() -> str:
 <div class="panel"><div class="pt">LAST 14 DAYS</div><div class="chart">{bars}</div>
   <div class="streak">Streak: {d["streak"]} day{"s" if d["streak"] != 1 else ""} in a row</div></div>
 <div class="panel"><div class="pt">BY LABEL</div>{labels_html}</div>
-<div class="panel"><div class="pt">WHAT YOU WORKED ON</div>{apps_html}</div>
+<div class="days">{chips}</div>
+<div class="panel"><div class="pt">WHAT YOU WORKED ON &middot; {d["day_label"].upper()}</div>{apps_html}</div>
 <div class="panel"><div class="pt">RECENT SESSIONS</div>
 <table>{recent_html}</table></div>
 </body></html>"""
@@ -459,8 +480,16 @@ def render_html() -> str:
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
+        q = parse_qs(urlparse(self.path).query)
+        day = None
+        if q.get("day"):
+            try:
+                day = date.fromisoformat(q["day"][0])
+            except ValueError:
+                day = None
+
         if self.path.split("?")[0] in ("/", "/index.html", "/stats"):
-            body = render_html().encode("utf-8")
+            body = render_html(day).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -468,7 +497,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif self.path.startswith("/data.json"):
-            body = json.dumps(collect(30)).encode("utf-8")
+            body = json.dumps(collect(30, day=day)).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

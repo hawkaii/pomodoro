@@ -164,6 +164,11 @@ records nothing, so an empty page means no block has finished yet.
 Metrics: today, this week (Monday start), this month, all time, day streak,
 last 14 days, minutes per label, 25 most recent sessions.
 
+*WHAT YOU WORKED ON* is scoped to **one day**, not all time. It opens on today
+and has a chip per day for the last week (`/?day=2026-11-22`). A block counts
+towards the day it **finished** on, so a block that crosses midnight lands on
+the later day.
+
 ## What you worked on
 
 While a focus block runs, the daemon samples the focused window every 5 s and
