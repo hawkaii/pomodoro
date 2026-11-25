@@ -23,6 +23,9 @@ from urllib.parse import urlparse, parse_qs
 DATA_DIR = os.path.expanduser("~/.local/share/pomodoro")
 DB_PATH = os.path.join(DATA_DIR, "history.db")
 
+LABEL_PALETTE = ["#DA291C", "#89b4fa", "#a6e3a1", "#FFC72C",
+                 "#cba6f7", "#fab387", "#94e2d5", "#f5c2e7"]
+
 DEFAULT_LABELS = [
     ("focus", "#DA291C"),
     ("study", "#89b4fa"),
@@ -117,6 +120,20 @@ def discard_activity(sref: str | None) -> None:
         return
     with _lock, _db() as db:
         db.execute("DELETE FROM activity WHERE sref = ?", (sref,))
+
+
+def ensure_label(name: str) -> None:
+    """Give a freshly typed label a colour so the stats page can show it."""
+    name = (name or "").strip()[:32]
+    if not name:
+        return
+    with _lock, _db() as db:
+        row = db.execute("SELECT COUNT(*) FROM labels WHERE name = ?", (name,)).fetchone()
+        if row and row[0]:
+            return
+        n = db.execute("SELECT COUNT(*) FROM labels").fetchone()[0]
+        db.execute("INSERT INTO labels(name, color) VALUES (?, ?)",
+                   (name, LABEL_PALETTE[n % len(LABEL_PALETTE)]))
 
 
 def labels() -> list[tuple[str, str]]:

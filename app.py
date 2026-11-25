@@ -304,6 +304,19 @@ def cmd_cycle_label():
     sync_ui()
 
 
+def cmd_set_label(name):
+    name = (name or "").strip()[:32]
+    if not name:
+        return
+    S["label"] = name
+    try:
+        stats.ensure_label(name)
+    except Exception as exc:
+        _log("ensure_label failed:", exc)
+    save()
+    sync_ui()
+
+
 def open_stats():
     url = f"http://127.0.0.1:{PORT}/"
     subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -568,6 +581,8 @@ def dispatch(cmd):
     }
     if cmd in handlers:
         handlers[cmd]()
+    elif cmd.startswith("set_label:"):
+        cmd_set_label(cmd[10:])
     elif cmd.startswith("set_auto:"):
         cmd_set_auto(cmd[9:] == "1")
     elif cmd.startswith("set_"):
@@ -699,7 +714,10 @@ def sync_ui(force=False):
     for key, w in W["steppers"].items():
         w["val"].set_text(str(S["cfg"][key]))
 
-    W["label"].set_label(S.get("label") or "focus")
+    if not W["label"].has_focus():
+        txt = S.get("label") or "focus"
+        if W["label"].get_text() != txt:
+            W["label"].set_text(txt)
     W["auto"].set_label("AUTO")
     if S["auto"]:
         W["auto"].add_css_class("on")
@@ -784,11 +802,15 @@ def build_ui(win):
     stepper(rows, "long", LABELS["long"], S["cfg"]["long"])
     stepper(rows, "every", LABELS["every"], S["cfg"]["every"])
 
-    lab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4, name="pomodoro-labelrow")
+    lab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, name="pomodoro-labelrow")
     root.append(lab)
     lab.append(Gtk.Label(label="LABEL", name="steplabel", halign=Gtk.Align.START, hexpand=True))
-    W["label"] = Gtk.Button(name="stepbtn")
-    W["label"].connect("clicked", lambda bb: cmd_cycle_label())
+    W["label"] = Gtk.Entry(name="labelentry", width_chars=10, max_width_chars=24)
+    W["label"].set_text(S.get("label") or "focus")
+    W["label"].connect("activate", lambda e: cmd_set_label(e.get_text()))
+    _focus = Gtk.EventControllerFocus()
+    _focus.connect("leave", lambda c: cmd_set_label(W["label"].get_text()))
+    W["label"].add_controller(_focus)
     lab.append(W["label"])
 
     W["stats"] = Gtk.Button(label="STATS", name="pomodoro-stats", halign=Gtk.Align.CENTER)
@@ -846,6 +868,18 @@ CSS = """
 	padding: 0 6px;
 }
 #stepbtn:hover { background-color: #2a2a2a; color: #ffffff; }
+#labelentry {
+	background-image: none;
+	background-color: #1c1c1c;
+	color: #ffffff;
+	border: 1px solid #2a2a2a;
+	border-radius: 9px;
+	font-size: 12px;
+	min-height: 24px;
+	padding: 0 6px;
+	caret-color: #DA291C;
+}
+#labelentry:focus { border-color: #DA291C; }
 #pomodoro-auto {
 	color: #4a4a4a;
 	background-color: transparent;

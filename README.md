@@ -115,8 +115,10 @@ itself; off, it waits for `START`.
 The chime is synthesised once into `~/.local/share/pomodoro/alarm.wav` and
 looped with `paplay`. No audio assets are shipped in this repo.
 
-The `LABEL` button cycles through `focus`, `study`, `code`, `review`. The
-label is stored with each finished focus block and drives the stats breakdown.
+The `LABEL` field is a text box: type any name and press Enter. The label is
+saved with each finished focus block and drives the stats breakdown. A new name
+gets a colour automatically the first time it is used. Four defaults ship:
+`focus`, `study`, `code`, `review`.
 
 Every panel action is also a socket command, so you can bind them to keys:
 
