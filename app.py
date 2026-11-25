@@ -61,6 +61,7 @@ S = {
     "label": "focus",
     "alarm": False,
     "sref": None,
+    "block_label": None,
     "ticks": 0,
     "updated_at": 0.0,
 }
@@ -368,6 +369,7 @@ def cmd_start():
         S["remaining_s"] = S["cfg"]["focus"] * 60
     if S["phase"] == "focus" and not S.get("sref"):
         S["sref"] = new_sref()
+        S["block_label"] = S.get("label") or "focus"
     S["running"] = True
     S["updated_at"] = now()
     save()
@@ -405,6 +407,7 @@ def cmd_reset():
     S["running"] = False
     S["remaining_s"] = 0
     S["sref"] = None
+    S["block_label"] = None
     save()
     sync_ui()
 
@@ -433,10 +436,10 @@ def advance(record=True, ring=True):
                 _log("discard failed:", exc)
         if record:
             try:
-                stats.record(S["cfg"]["focus"], S.get("label") or "focus",
-                             sref=S.get("sref"))
-                _log("recorded", S["cfg"]["focus"], "min label=",
-                     S.get("label"), "sref=", S.get("sref"))
+                used = S.get("block_label") or S.get("label") or "focus"
+                stats.record(S["cfg"]["focus"], used, sref=S.get("sref"))
+                _log("recorded", S["cfg"]["focus"], "min label=", used,
+                     "sref=", S.get("sref"))
             except Exception as exc:      # stats must never break the timer
                 _log("stats.record failed:", exc)
         S["sessions"] += 1
@@ -451,6 +454,7 @@ def advance(record=True, ring=True):
         S["phase"] = "focus"
         S["remaining_s"] = S["cfg"]["focus"] * 60
         S["sref"] = new_sref()
+        S["block_label"] = S.get("label") or "focus"
     else:
         return
 
@@ -759,6 +763,24 @@ def build_ui(win):
     W["auto"].connect("clicked", lambda bb: cmd_set_auto(not S["auto"]))
     head.append(W["auto"])
 
+    info = Gtk.Button(label="i", name="pomodoro-info")
+    info.set_tooltip_text("How labels work. Click for details.")
+    pop = Gtk.Popover()
+    popbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, name="infobody")
+    popbox.append(Gtk.Label(label="LABELS", name="infohead", halign=Gtk.Align.START))
+    tip = Gtk.Label(
+        label=("The label is frozen when a block starts.\n"
+               "Changing it mid-block applies to the next block, "
+               "not the one already running.\n\n"
+               "Type a name and press Enter, or click away, to save it.\n"
+               "A new name gets a colour the first time it is used."),
+        name="infotext", wrap=True, max_width_chars=34, xalign=0)
+    popbox.append(tip)
+    pop.set_child(popbox)
+    pop.set_parent(info)
+    info.connect("clicked", lambda bb: pop.popup())
+    head.append(info)
+
     close = Gtk.Button(label="✕", name="pomodoro-close")
     close.connect("clicked", lambda bb: cmd_close())
     head.append(close)
@@ -892,6 +914,26 @@ CSS = """
 }
 #pomodoro-auto.on { color: #DA291C; }
 #pomodoro-auto:hover { background-color: #1c1c1c; }
+#pomodoro-info {
+	color: #666666;
+	background-color: transparent;
+	border: none;
+	border-radius: 10px;
+	font-size: 11px;
+	font-weight: bold;
+	min-width: 20px;
+	min-height: 22px;
+	padding: 0;
+}
+#pomodoro-info:hover { background-color: #1c1c1c; color: #DA291C; }
+#infobody {
+	background-color: #0d0d0d;
+	border: 1px solid #2a2a2a;
+	border-radius: 12px;
+	padding: 12px;
+}
+#infohead { color: #8a8a8a; font-size: 10px; letter-spacing: 2px; }
+#infotext { color: #cccccc; font-size: 12px; }
 #pomodoro-close {
 	color: #777777;
 	background-color: transparent;
