@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from contextlib import closing
+from contextlib import contextmanager
 import threading
 import time
 from datetime import date, datetime, timedelta
@@ -34,13 +34,23 @@ PORT_FILE = os.path.join(DATA_DIR, "port")
 _lock = threading.Lock()
 
 
+@contextmanager
 def _db():
-    """A connection that is actually closed on exit.
+    """A connection that commits on success and always closes.
 
-    `with sqlite3.connect(...)` only commits — it does not close — and that
-    leaked one file descriptor per call until the process hit its fd limit.
+    `with sqlite3.connect(...)` commits but never closes (fd leak), and
+    `closing()` closes but never commits (silent data loss). Neither alone is
+    correct, so do both here.
     """
-    return closing(sqlite3.connect(DB_PATH))
+    db = sqlite3.connect(DB_PATH)
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------- storage

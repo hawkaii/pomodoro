@@ -422,6 +422,8 @@ def advance(record=True, ring=True):
             try:
                 stats.record(S["cfg"]["focus"], S.get("label") or "focus",
                              sref=S.get("sref"))
+                _log("recorded", S["cfg"]["focus"], "min label=",
+                     S.get("label"), "sref=", S.get("sref"))
             except Exception as exc:      # stats must never break the timer
                 _log("stats.record failed:", exc)
         S["sessions"] += 1
